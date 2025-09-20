@@ -1,0 +1,83 @@
+---
+- name: Base tools
+  ansible.builtin.dnf:
+    name: [curl, firewalld]
+    state: present
+
+- name: Enable & start firewalld
+  ansible.builtin.systemd:
+    name: firewalld
+    state: started
+    enabled: true
+
+- name: Add SQL Server repo
+  ansible.builtin.get_url:
+    url: https://packages.microsoft.com/config/rhel/9/mssql-server-2022.repo
+    dest: /etc/yum.repos.d/mssql-server.repo
+    mode: '0644'
+
+- name: Install SQL Server engine
+  ansible.builtin.dnf:
+    name: mssql-server
+    state: present
+    update_cache: true
+
+- name: Install SELinux policy (optional)
+  ansible.builtin.dnf:
+    name: mssql-server-selinux
+    state: present
+  ignore_errors: true
+
+- name: Configure SQL Server (accept EULA, set SA password, edition)
+  ansible.builtin.command:
+    cmd: /opt/mssql/bin/mssql-conf -n setup accept-eula
+  environment:
+    MSSQL_SA_PASSWORD: "{{ mssql_sa_password | default(vault_mssql_sa_password) }}"
+    MSSQL_PID: "{{ mssql_pid }}"
+  args:
+    creates: /var/opt/mssql/data/master.mdf
+
+- name: Enable & start SQL Server service
+  ansible.builtin.systemd:
+    name: mssql-server
+    state: started
+    enabled: true
+
+- name: Open port 1433/tcp
+  ansible.builtin.command: firewall-cmd --zone=public --add-port=1433/tcp --permanent
+  register: fw1
+  changed_when: "'success' in fw1.stdout or 'ALREADY_ENABLED' in fw1.stdout"
+
+- name: Reload firewalld
+  ansible.builtin.command: firewall-cmd --reload
+  changed_when: false
+
+- name: Add Microsoft prod repo (tools)
+  ansible.builtin.get_url:
+    url: https://packages.microsoft.com/config/rhel/9/prod.repo
+    dest: /etc/yum.repos.d/msprod.repo
+    mode: '0644'
+
+- name: Install mssql-tools18 & unixODBC-devel
+  ansible.builtin.dnf:
+    name: [mssql-tools18, unixODBC-devel]
+    state: present
+
+- name: Add tools path to all users
+  ansible.builtin.copy:
+    dest: /etc/profile.d/mssql-tools.sh
+    mode: '0644'
+    content: |
+      export PATH="$PATH:/opt/mssql-tools18/bin"
+
+- name: Run SELECT @@VERSION (Trust cert with -C)
+  ansible.builtin.shell: |
+    source /etc/profile.d/mssql-tools.sh
+    sqlcmd -S localhost -U SA -P '{{ mssql_sa_password | default(vault_mssql_sa_password) }}' -C -Q "SELECT @@VERSION"
+  register: version_out
+  changed_when: false
+
+- name: Show SQL Server version
+  ansible.builtin.debug:
+    var: version_out.stdout
+
